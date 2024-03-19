@@ -1,0 +1,106 @@
+---
+title: "Exercise1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidygraph)
+library(igraph)
+library(ggraph)
+library(network)
+library(visNetwork)
+library(networkD3)
+```
+
+Load LinkedIn Connections
+
+```{r}
+connections <- read.csv("/Users/moizshaikh/Downloads/Connections.csv", sep = ",", skip = 3)
+# Use View(connections) in RStudio to manually inspect the data
+```
+
+Total Number of Connections
+
+```{r}
+total_connections <- nrow(connections)
+print(paste("Total number of connections:", total_connections))
+```
+
+
+Data Analysis: Count Contacts by Company
+
+```{r}
+company_counts <- connections %>%
+  group_by(Company) %>%
+  summarise(Count = n()) %>%
+  arrange(desc(Count))
+print(company_counts)
+
+```
+
+Frequency Table and Bar Chart
+
+```{r}
+connections <- connections %>%
+  select(Name = `First.Name`, Company, Position)
+freq_table <- table(connections$Company)
+freq_table <- sort(freq_table, decreasing = TRUE)
+top15 <- head(freq_table, n = 15)
+knitr::kable(as.data.frame(top15), col.names = c("Company", "Connections"))
+
+top15_df <- as.data.frame(top15)
+names(top15_df) <- c("Company", "Connections")
+top15_df$Company <- factor(top15_df$Company, levels = top15_df$Company)
+
+ggplot(top15_df, aes(x = reorder(Company, -Connections), y = Connections, fill = Company)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  scale_fill_viridis_d(direction = -1, option = "C") +
+  labs(title = "Top 15 Connections on LinkedIn",
+       x = "Company",
+       y = "Number of Connections",
+       fill = "Company") +
+  theme_minimal() +
+  theme(legend.position = "none",
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12, face = "bold"))
+```
+Network Creation and Visualization
+
+```{r}
+people <- connections %>% distinct(Name) %>% rename(label = Name)
+companies <- connections %>% distinct(Company) %>% rename(label = Company)
+nodes <- full_join(people, companies, by = "label") %>% rowid_to_column("id")
+edges <- connections %>%
+  select(Name, Company) %>%
+  left_join(nodes, by = c("Name" = "label")) %>%
+  rename(from = id) %>%
+  left_join(nodes, by = c("Company" = "label")) %>%
+  rename(to = id) %>%
+  distinct(from, to)
+network_igraph <- graph_from_data_frame(d = edges, vertices = nodes, directed = TRUE)
+
+plot(network_igraph, vertex.size = 3, vertex.label.cex = 0.2, edge.arrow.size = 0.01)
+
+tbl_network <- as_tbl_graph(network_igraph)
+ggraph(tbl_network, layout = "fr") + geom_edge_link()
+
+```
+Interactive Network Visualization with visNetwork
+
+```{r}
+nodes$color <- ifelse(nodes$label == "McGill University - Desautels Faculty of Management", "red", "gray")
+nodes_vis <- nodes %>% select(id, label, color) %>% mutate(title = label)
+edges_vis <- edges %>% select(from, to)
+visNetwork(nodes_vis, edges_vis) %>%
+  visNodes(color = list(background = nodes_vis$color, border = "#2b2b2b")) %>%
+  visEdges(arrows = 'to') %>%
+  visOptions(highlightNearest = TRUE, nodesIdSelection = TRUE)
+
+```
+
