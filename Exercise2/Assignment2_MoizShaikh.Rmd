@@ -1,0 +1,111 @@
+---
+title: "Assignment2"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Install the readxl package (if you haven't already)
+#install.packages("readxl")
+
+# Load the readxl package
+library(readxl)
+```
+
+```{r}
+fakebook_data <- read_excel("/Users/moizshaikh/Documents/McGill Winter 2024/OGRB672/Fakebook.xlsx")
+```
+
+
+
+```{r}
+head(fakebook_data)
+```
+
+```{r}
+# Load the igraph package
+library(igraph)
+
+# Assuming fakebook_data has two columns: the first for 'from' nodes and the second for 'to' nodes
+# Create a graph object from the edge list
+graph <- graph_from_data_frame(fakebook_data, directed = FALSE)
+
+# Calculate centrality measures for all nodes
+degree_centrality <- degree(graph, mode = "all")
+closeness_centrality <- closeness(graph, mode = "all")
+betweenness_centrality <- betweenness(graph, directed = FALSE)
+
+# Extract centrality measures for open seats (A, B, C, D)
+# Ensure the node names in your data match these seat labels exactly
+open_seats <- c("A", "B", "C", "D")
+centrality_measures <- data.frame(
+  Seat = open_seats,
+  Degree = degree_centrality[open_seats],
+  Closeness = closeness_centrality[open_seats],
+  Betweenness = betweenness_centrality[open_seats]
+)
+
+# View the centrality measures for open seats
+print(centrality_measures)
+
+```
+```{r}
+# Calculate combined label with centrality measures
+node_labels <- paste(V(graph)$name, "\nDegree:", round(degree_centrality, 2),
+                     "\nCloseness:", round(closeness_centrality, 2),
+                     "\nBetweenness:", round(betweenness_centrality, 2))
+
+# Plot the network graph
+par(mar = c(0,0,1,0)) # Remove margins around the plot
+plot(graph, 
+     layout = layout_nicely(graph), # This layout algorithm usually provides a nice arrangement
+     vertex.label = node_labels, # Use the combined labels
+     vertex.color = "skyblue", # Color of the nodes
+     vertex.size = 20, # Size of the nodes
+     vertex.frame.color = NA, # Remove borders around nodes
+     vertex.label.family = "sans", # Font family for labels
+     vertex.label.cex = 0.7, # Font size for labels
+     edge.color = "gray", # Color of the edges
+     edge.arrow.size = 0.5, # Size of the arrowheads (if graph is directed)
+     main = "Network Graph with Centrality Measures") # Title of the plot
+
+```
+
+Assignment: Network Centrality Analysis of Bus Seating
+
+In this assignment, we analyze a bus seating arrangement represented as a network where seats are nodes connected by edges that represent proximity. We have four seats (A-D) available for selection, with different centrality measures. Based on these measures, we discuss the implications of choosing a particular seat and when such choices would be beneficial or not.
+
+Centrality Measures:
+
+Degree Centrality indicates the number of direct connections a node has.
+Closeness Centrality measures how close a node is to all other nodes in the network.
+Betweenness Centrality quantifies how often a node acts as a bridge along the shortest path between two other nodes.
+Seat A:
+
+Degree: 3
+Closeness: 0.0625
+Betweenness: 14.0
+Seat A has the fewest connections but the highest betweenness centrality. This implies that while it's less directly connected to other seats, it is often traversed by others moving around the bus. It's a strategic seat for overseeing the movement but could lead to frequent disturbances. It would be beneficial if I needed to monitor the environment, less so if I desired uninterrupted privacy.
+
+Seats B & C:
+
+Degree: 5
+Closeness: 0.07143
+Betweenness: 9.0333 (B), 8.6 (C)
+Seats B and C are highly central, both in terms of direct connections and closeness to all other seats, with relatively high betweenness. These seats are ideal for someone who aims to engage with others or needs to be accessible. However, these wouldn't be beneficial for someone seeking a quieter experience due to the likelihood of social interaction and people passing by.
+
+Seat D:
+
+Degree: 5
+Closeness: 0.0625
+Betweenness: 3.2667
+Seat D shares high degree centrality with seats B and C but has lower closeness centrality and the least betweenness centrality. This seat strikes a balance between being socially accessible and not being on the main path of movement. This would be beneficial for someone who desires a social seat with less foot traffic. It's not ideal for someone who wishes to engage with the whole bus or seeks a very private seat.
+
+Conclusion:
+
+The choice of seat has implications for the experience on the bus. Seat A is for those balancing a preference for fewer neighbors with the likelihood of passing traffic. Seats B and C would suit individuals seeking active engagement and don't mind being in a bustling environment. Seat D is optimal for those who prefer active engagement with immediate neighbors while minimizing disruption from passersby. My choice would align with my objectives for the journey, considering the trade-offs presented by each seat's centrality in the network.
