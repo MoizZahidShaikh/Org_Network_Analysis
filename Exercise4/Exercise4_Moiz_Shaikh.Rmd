@@ -1,0 +1,434 @@
+---
+title: "Exercise4"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Install and load the arrow package
+#install.packages("arrow")
+#install.packages("gender")
+#install.packages("devtools")
+#devtools::install_github("ropensci/genderdata", type = "source")
+#install_genderdata_package() 
+```
+
+
+```{r}
+library(genderdata)
+```
+
+```{r}
+library(gender)
+library(arrow)
+library(dplyr)
+library(tidyr)
+library(wru)
+library(lubridate)
+library(igraph)
+```
+
+```{r}
+# set option to view all columns
+options(dplyr.width = Inf)
+```
+
+
+```{r}
+# Data ingestion from stored files in Parquet and CSV formats for analysis.
+parquet_file <- "C:/Users/pc/Downloads/Project_Network_Analysis/app_data_sample.parquet"
+applications  <- read_parquet(parquet_file)
+```
+
+```{r}
+# Read CSV file
+edge_link <- "C:/Users/pc/Downloads/Project_Network_Analysis/edges_sample.csv"
+edges <- read.csv(edge_link)
+```
+
+```{r}
+# Quick structure overview of the loaded 'applications' dataframe.
+str(applications)
+```
+
+# Identifying Examiner Genders
+
+### We aim to infer the gender of each examiner from their first name, listed in the examiner_name_first column, utilizing the gender library based on an adapted version of an example they provided.
+
+### The applications database houses over 2 million entries. This is reflective of the numerous entries per examiner, correlating with the total applications they have assessed in the given period. Our initial step is to compile a distinct list of examiner names in examiner_names. Subsequently, we'll estimate the gender for each unique name and reintegrate this data into the original dataset. To begin, we focus on extracting unique names to avoid redundancy:
+
+
+```{r}
+
+# Extract unique examiner first names.
+examiner_names <- applications %>% 
+  distinct(examiner_name_first)
+
+# Associate names with gender and simplify the resulting data.
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+# remove extra colums from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# # Merge the gender information back into the main dataset.
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# Cleanup of intermediate variables to free memory.
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+```
+
+# Guess the examiner’s race
+# Similar process as gender identification, focusing on last names to predict race using the 'predict_race' function from the 'wru' package.
+
+```{r}
+
+
+examiner_surnames <- applications %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+# removing extra columns
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+
+```
+
+# Data preparation: Converting date columns to Date type and calculating processing time for applications.
+
+```{r}
+
+applications <- applications %>%
+  mutate(
+    filing_date = as.Date(filing_date),
+    patent_issue_date = as.Date(patent_issue_date),
+    abandon_date = as.Date(abandon_date),
+    final_decision_date = coalesce(patent_issue_date, abandon_date),
+    app_proc_time = as.numeric(final_decision_date - filing_date),
+    # Replace negative app_proc_time with NA
+    app_proc_time = ifelse(app_proc_time < 0, NA, app_proc_time)
+  )
+```
+
+# Load additional libraries for network analysis and graph-based visualization.
+
+```{r}
+library(dplyr)
+library(tidygraph)
+library(ggraph)
+
+# Preparing edge data for network analysis, including handling missing values and data type conversions.
+
+edges <- edges %>%
+  mutate(
+    from = as.character(ego_examiner_id),
+    to = as.character(alter_examiner_id)
+  ) %>%
+  mutate(
+    from = ifelse(is.nan(as.numeric(from)), NA, from),
+    to = ifelse(is.nan(as.numeric(to)), NA, to)
+  ) %>%
+  drop_na()
+
+# Relocating and renaming examiner ID for consistency in the applications dataset, ensuring data cleanliness.
+
+applications <- applications %>%
+  relocate(examiner_id, .before = application_number) %>%
+  mutate(examiner_id = as.character(examiner_id)) %>%
+  drop_na(examiner_id) %>%
+  rename(name = examiner_id)
+
+# Constructing a graph object for network analysis, ensuring nodes are unique and data is consistent.
+
+graph <- tbl_graph(
+  edges = (edges %>% relocate(from, to)),
+  directed = TRUE
+)
+
+applications <- applications %>%
+  mutate(name = as.character(name)) %>%
+  distinct(name, .keep_all = TRUE)
+
+graph <- graph %>%
+  activate(nodes) %>%
+  inner_join(
+    (applications %>% distinct(name, .keep_all = TRUE)),
+    by = "name"
+  )
+```
+
+# Calculating network centrality measures for nodes, aiding in the analysis of examiner influence and connectivity.
+
+```{r}
+graph %>%
+  activate(nodes) %>%
+  mutate(
+    degree = centrality_degree(),
+    betweenness = centrality_betweenness(),
+    closeness = centrality_closeness()
+  ) %>%
+  select(name, degree, betweenness, closeness) %>%
+  arrange(-degree)
+```
+
+# Integrating centrality measures back into the applications dataframe for comprehensive analysis.
+
+```{r}
+node_data <- graph %>%
+  activate(nodes) %>%
+  mutate(
+    degree = centrality_degree(),
+    betweenness = centrality_betweenness(),
+    closeness = centrality_closeness()
+  ) %>%
+  select(name, degree, betweenness, closeness) %>%
+  as_tibble() # Convert to a tibble/data frame for joining
+
+# Joining the centrality measures back to the applications dataframe
+applications <- applications %>%
+  left_join(node_data, by = c("name" = "name"))
+
+# rename name to examiner_id
+applications <- applications %>%
+  rename(examiner_id = name)
+
+head(applications,5)
+```
+
+
+```{r}
+#null values in applications data each column
+sapply(applications, function(x) sum(is.na(x)))
+```
+
+
+```{r}
+# total rows in applications data
+nrow(applications)
+```
+
+
+```{r}
+# Dropping rows with NA in regression columns
+applications <- applications %>%
+  drop_na(app_proc_time, degree, gender, examiner_art_unit, uspc_class,disposal_type,race)
+```
+
+# Model preparation: Transforming selected variables into categorical factors for regression analysis.
+
+```{r}
+applications <- applications %>%
+  mutate(
+    examiner_art_unit = as.factor(examiner_art_unit),
+    uspc_class = as.factor(uspc_class),
+    gender = as.factor(gender),
+    race = as.factor(race),
+    disposal_type = as.factor(disposal_type)
+  )
+```
+
+
+I wanted to use examiner_art_unit, uspc_class as categorical variable but considering ther are too many they are not added as features
+
+disposal_type categorical varaible is used because it tellls about the status of appplication“ISS” (issued), "ABN" (abandoned), "PEND' (PENDING). There must be a differnce in processing times for each of the category
+
+Race is used as well to understand affect of race in processing times
+
+
+
+```{r}
+#Model 1: Examining the influence of degree centrality along with categorical variables on application processing time.
+
+model_degree <- lm(app_proc_time ~ degree +race +disposal_type , data = applications)
+summary(model_degree)
+```
+
+
+#### Model 1: Degree Centrality with Categorical Variables
+
+**Model Formula**: **`app_proc_time ~ degree + race + disposal_type`**
+
+The results from Model 1 provide several insights into the relationship between the application processing time and the examined variables, including degree centrality, race, and disposal type of the patent application. Here's a breakdown of the key points:
+
+Degree Centrality: The coefficient for degree centrality is positive (Estimate = 10.29) and statistically significant (p < 0.001). This suggests that for each unit increase in degree centrality, the processing time increases by approximately 10.29 days, holding other variables constant. This could indicate that examiners who are more central to the network—perhaps because they handle a greater volume of applications or are involved in more complex cases—tend to have longer processing times.
+
+Race: The coefficients for the race categories show mixed results. Notably, applications processed by examiners identified as "white" have processing times that are, on average, 126.15 days shorter than those processed by examiners of the baseline race category (which is not specified here but could be implied as the omitted category), and this result is statistically significant (p = 0.0133). The effects for other race categories ("black," "Hispanic," "other") are not statistically significant, indicating that, compared to the baseline category, these races do not have a significantly different processing time when controlling for other factors.
+
+Disposal Type: The coefficient for disposal type "ISS" (issued patents) is positive (Estimate = 92.74) and statistically significant (p = 0.0488), suggesting that applications that are eventually issued take, on average, 92.74 days longer to process than those that are not issued, perhaps reflecting the additional scrutiny and requirements involved in issuing a patent.
+
+Model Fit: The model's R-squared value is 0.02804, indicating that approximately 2.8% of the variance in processing times can be explained by the model's variables. While statistically significant, this suggests that the majority of the variation in processing times is due to factors not included in the model.
+
+Overall Significance: The F-statistic (10.04) and its associated p-value (5.821e-11) indicate that the model is statistically significant, meaning that there is a relationship between the predictor variables and processing time. However, given the low R-squared value, the model's explanatory power is limited.
+
+In summary, Model 1 highlights the significance of an examiner's network position and the racial categorization of the examiner on the processing times of patent applications, with specific attention to the differential impact on applications that are issued. Despite its statistical significance, the model explains a relatively small portion of the variability in processing times, suggesting that additional factors not captured by the model may play a substantial role in determining processing outcomes.
+
+
+```{r}
+#Model 2: Betweenness Centrality with Categorical Variables
+
+model_betweenness <- lm(app_proc_time ~ betweenness +race +disposal_type, data = applications)
+summary(model_betweenness)
+```
+
+
+#### Model 2: Betweenness Centrality with Categorical Variables
+
+**Model Formula**: **`app_proc_time ~ betweenness + race + disposal_type`**
+
+Model 2 evaluates the impact of betweenness centrality, race, and disposal type on patent application processing times. The findings are as follows:
+
+Betweenness Centrality: The coefficient for betweenness centrality is not statistically significant (Estimate = 0.0081, p = 0.3512), suggesting it has a negligible impact on processing times. This implies that an examiner's role as a network bridge does not significantly affect the speed of processing patent applications.
+
+Race: The coefficient for examiners identified as "white" shows a significant reduction in processing times (Estimate = -126.8, p = 0.0139), similar to Model 1, indicating that racial categorization influences processing durations. Other racial categories did not show a statistically significant difference.
+
+Disposal Type: Applications that are issued (disposal_typeISS) show a tendency towards longer processing times (Estimate = 86.13, p = 0.0702), although this result is marginally significant, hinting at the extensive review required for issuance.
+
+Model Fit: The R-squared value is notably low at 0.006245, indicating that only about 0.62% of the variance in processing times is explained by the model. This highlights the presence of other influential factors not captured by this model.
+
+Overall Significance: Despite the low explanatory power, the model is statistically significant (p-value = 0.04158), suggesting that the variables included do have an effect on processing times, albeit a small one.
+
+In essence, Model 2 underscores the limited role of betweenness centrality in affecting patent processing times, reaffirms the impact of racial categorization, and suggests a nuanced influence of disposal type on processing durations. However, the model's low R-squared value points to a significant portion of the variability in processing times being driven by factors outside the model's scope.
+
+
+```{r}
+#Model 3: Degree Centrality with Gender Interaction and Categorical Variables
+
+model_degree_gender <- lm(app_proc_time ~ degree * gender + +race +disposal_type, data = applications)
+summary(model_degree_gender)
+```
+
+#### Model 3: Degree Centrality with Gender Interaction
+
+**Model Formula**: **`app_proc_time ~ degree * gender + race + disposal_type`**
+
+Model 3 explores how degree centrality, gender, race, and disposal type impact patent application processing times, incorporating an interaction term between degree centrality and gender. The results indicate:
+
+Degree Centrality: Each unit increase in degree centrality increases processing time by approximately 12.53 days (p < 0.00001), indicating that more central examiners experience longer processing times, likely due to handling more or complex applications.
+
+Gender: Male examiners on average have processing times that are 157.42 days longer than their female counterparts (p = 0.00518), highlighting a significant gender disparity in processing times.
+
+Race: Similar to previous models, the race category "white" shows a significant reduction in processing times (-132.02 days, p = 0.00954), reaffirming racial differences in processing speeds. Other racial categories do not show significant differences.
+
+Disposal Type: The coefficient for issued patents (disposal_typeISS) is positive (90.66) and approaches statistical significance (p = 0.05375), suggesting that patents that are issued tend to have longer processing times, albeit less conclusively than in prior models.
+
+Degree and Gender Interaction: The interaction term between degree centrality and gender (male) is not significant (p = 0.32606), suggesting that the impact of degree centrality on processing times does not differ significantly between male and female examiners.
+
+Model Fit: The model explains 3.17% of the variance in processing times (Multiple R-squared = 0.03169), a slight improvement over the previous models but still indicating a large portion of variance is unexplained by the model's variables.
+
+Overall Significance: The model is statistically significant (p-value = 1.712e-11), indicating a reliable relationship between the predictors and processing times, despite the low explanatory power.
+
+In summary, Model 3 underscores the influence of examiner centrality and gender on processing times, with significant findings for gender differences and the impact of being a "white" examiner. The interaction between degree and gender does not significantly affect processing times, suggesting the primary effects of centrality and gender operate independently of each other. Despite its contributions, the model leaves much of the variance in processing times unexplained, pointing to the complexity of factors influencing patent processing.
+
+
+```{r}
+#Model 4: Betweenness Centrality with Gender Interaction and Categorical Variables
+model_betweenness_gender <- lm(app_proc_time ~ betweenness * gender +race +disposal_type, data = applications)
+summary(model_betweenness_gender)
+```
+
+
+```
+
+#### Model 4: Betweenness Centrality with Gender Interaction
+
+Model 4 assesses the impact of betweenness centrality and its interaction with gender, alongside race and disposal type, on patent application processing times. The findings indicate:
+
+Betweenness Centrality: The coefficient for betweenness centrality (-0.02409) is not significant (p = 0.4035), suggesting that betweenness centrality alone does not have a clear impact on processing times. This implies that an examiner's position as a network bridge does not significantly influence how quickly they process applications.
+
+Gender: The coefficient for male examiners (128.73) is significant (p = 0.0142), indicating that male examiners, on average, have longer processing times than their female counterparts. This highlights a gender disparity in processing times.
+
+Race: Consistent with previous models, the race category "white" shows a significant reduction in processing times (-131.83, p = 0.0106), reiterating that racial differences exist in processing speeds. Other racial categories do not show significant differences.
+
+Disposal Type: The coefficient for issued patents (disposal_typeISS) is positive (86.60) and approaches statistical significance (p = 0.0684), suggesting a trend where issued patents may require longer processing times, although this result is less conclusive.
+
+Betweenness and Gender Interaction: The interaction between betweenness centrality and gender (male) is not significant (p = 0.2539), indicating that the effect of betweenness centrality on processing times does not significantly differ between male and female examiners.
+
+Model Fit: The R-squared value is 0.01004, meaning that the model explains only about 1% of the variance in processing times. This indicates that a vast majority of the variance is due to factors not included in the model.
+
+Overall Significance: Despite the low explanatory power, the model is statistically significant (p-value = 0.006933), suggesting there are relationships between the predictors and processing times, albeit small.
+
+In essence, Model 4 underscores a lack of significant impact from betweenness centrality on processing times and confirms the influence of gender and racial categorization. The interaction term between betweenness and gender does not significantly influence processing times, suggesting that the primary effects of gender and betweenness operate independently. The low R-squared value highlights the complexity of factors influencing patent processing times, indicating that many influencing variables are not captured by the model.
+
+### **Explaining Regression Results and Implications for the USPTO**
+
+### **Conclusion and Implications for the USPTO**
+
+The series of linear regression models were designed to examine how the centrality of examiners within the USPTO network and other demographic factors affect patent application processing times. Key findings indicate that higher degree centrality marginally increases processing times, while betweenness centrality does not demonstrate a significant impact. This suggests that examiners who occupy more central roles in the network, potentially handling a larger volume or more complex applications, may experience longer processing times.
+
+### **Implications of Centrality on Operational Efficiency**
+
+**1. Strategic Workload Management: The observed correlation between degree centrality and longer processing times signals a need for strategic workload management. Examiners at the network's core may benefit from targeted support to manage their heavier or more complex caseloads efficiently. Implementing strategies such as workload redistribution or increased support could help maintain or even improve the quality of patent examination without extending processing times.
+
+### **Examination of Gender Interaction**
+
+Gender-Based Processing Time Differences: The analysis did not find significant interaction effects between gender and centrality on processing times, yet it did reveal that male examiners generally have longer processing times than their female counterparts. This distinction raises questions about underlying factors contributing to these differences and suggests the need for further investigation into the workflows and challenges faced by examiners of different genders
+
+### **Implications for the USPTO**
+
+Equitable Process Optimization: The findings underscore the importance of considering both centrality in the examiner network and gender when devising strategies to optimize processing times. With the goal of ensuring equitable and efficient patent examination processes, the USPTO may need to adopt tailored approaches that account for the unique challenges and needs of examiners based on their network position and gender.
+
+Addressing Racial Disparities: Similarly, the significant differences in processing times across racial categories suggest that racial dynamics within the examination process warrant closer attention. Understanding and addressing these disparities is crucial for fostering an equitable work environment and ensuring that patent examination standards remain consistent across diverse groups of examiners.
+
+In conclusion, while the regression models highlight several factors influencing patent application processing times, they also reveal areas where the USPTO could focus its efforts to improve operational efficiency and equity. By acknowledging and addressing the nuanced effects of examiner centrality, gender, and race on processing times, the USPTO can take meaningful steps toward optimizing its patent examination processes and upholding its commitment to fairness and quality in intellectual property examination.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
